@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ToolBox: ズーム対応ハートフォト</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/hammer.js/2.0.8/hammer.min.js"></script>
+    <style>
+        body { font-family: sans-serif; background: #f0f0f0; margin: 0; display: flex; flex-direction: column; align-items: center; padding: 10px; overflow: hidden; height: 100vh; }
+        
+        /* ズーム可能な外枠 */
+        #zoom-container {
+            width: 100%; max-width: 450px; aspect-ratio: 850 / 800;
+            overflow: hidden; touch-action: none; border: 2px solid #ccc; background: #ddd;
+        }
+
+        #export-area { 
+            position: relative; width: 100%; height: 100%;
+            transform-origin: 0 0;
+            background-image: linear-gradient(45deg, #eee 25%, transparent 25%, transparent 75%, #eee 75%), 
+                              linear-gradient(45deg, #eee 25%, white 25%, white 75%, #eee 75%);
+            background-size: 15px 15px;
+        }
+
+        .photo-slot { position: absolute; border: 1px dashed #bbb; background: rgba(255,255,255,0.4); overflow: hidden; display: flex; align-items: center; justify-content: center; }
+        .img-container { width: 100%; height: 100%; position: relative; pointer-events: none; }
+        .img-container img { position: absolute; transform-origin: center; pointer-events: none; }
+        
+        .controls { margin-top: 15px; width: 100%; max-width: 400px; z-index: 10; }
+        .save-btn { width: 100%; padding: 12px; cursor: pointer; background: #2980b9; color: white; border: none; border-radius: 8px; font-weight: bold; }
+        
+        #overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 100; flex-direction: column; align-items: center; justify-content: center; color: white; }
+        #overlay img { max-width: 90%; max-height: 70%; border: 1px solid #555; background: white; }
+        .close-btn { margin-top: 20px; padding: 10px 25px; background: #e74c3c; color: white; border-radius: 5px; }
+
+        input[type="file"] { display: none; }
+        .info { font-size: 10px; color: #666; margin-top: 5px; }
+    </style>
+</head>
+<body>
+
+    <div id="zoom-container">
+        <div id="export-area"></div>
+    </div>
+
+    <div class="controls">
+        <button class="save-btn" onclick="generateTransparentImage()">透過画像を作成</button>
+        <div class="info">背景を二本指で操作してズーム、ダブルタップでリセット</div>
+    </div>
+
+    <div id="overlay">
+        <p>画像を長押しして「保存」</p>
+        <img id="finalImage">
+        <div class="close-btn" onclick="document.getElementById('overlay').style.display='none'">戻る</div>
+    </div>
+
+    <input type="file" id="fileInput" accept="image/*">
+
+    <script>
+        const area = document.getElementById('export-area');
+        const zoomContainer = document.getElementById('zoom-container');
+        const fileInput = document.getElementById('fileInput');
+        let activeSlot = null;
+
+        // エディタ全体のズーム管理
+        let editorScale = 1, editorX = 0, editorY = 0;
+        const hammerManager = new Hammer.Manager(zoomContainer);
+        hammerManager.add(new Hammer.Pinch());
+        hammerManager.add(new Hammer.Pan({ threshold: 0 }));
+        hammerManager.add(new Hammer.Tap({ event: 'doubletap', taps: 2 }));
+
+        hammerManager.on("pinchmove", (e) => {
+            editorScale = Math.max(1, Math.min(4, e.scale));
+            updateEditorTransform();
+        });
+
+        hammerManager.on("panmove", (e) => {
+            if (editorScale > 1) {
+                editorX = e.deltaX; editorY = e.deltaY;
+                updateEditorTransform();
+            }
+        });
+
+        hammerManager.on("doubletap", () => {
+            editorScale = 1; editorX = 0; editorY = 0;
+            updateEditorTransform();
+        });
+
+        function updateEditorTransform() {
+            area.style.transform = `translate(${editorX}px, ${editorY}px) scale(${editorScale})`;
+        }
+
+        // 写真スロットの配置
+        const layoutData = [
+            {x: 60, y: 187, w: 100, h: 100}, {x: 60, y: 292, w: 100, h: 100},
+            {x: 165, y: 187, w: 205, h: 205}, {x: 165, y: 83, w: 100, h: 100},
+            {x: 270, y: 398, w: 205, h: 205}, {x: 165, y: 398, w: 100, h: 100},
+            {x: 480, y: 292, w: 205, h: 205}, {x: 270, y: 83, w: 100, h: 100},
+            {x: 375, y: 292, w: 100, h: 100}, {x: 375, y: 187, w: 100, h: 100},
+            {x: 375, y: 608, w: 100, h: 100}, {x: 480, y: 502, w: 100, h: 100},
+            {x: 690, y: 292, w: 100, h: 100}, {x: 690, y: 187, w: 100, h: 100},
+            {x: 480, y: 83, w: 205, h: 205}
+        ];
+
+        layoutData.forEach(item => {
+            const slot = document.createElement('div');
+            slot.className = 'photo-slot';
+            slot.style.left = (item.x / 850 * 100) + '%';
+            slot.style.top = (item.y / 800 * 100) + '%';
+            slot.style.width = (item.w / 850 * 100) + '%';
+            slot.style.height = (item.h / 800 * 100) + '%';
+            slot.dataset.scale = 1.0; slot.dataset.posX = 0; slot.dataset.posY = 0;
+
+            const mc = new Hammer(slot);
+            mc.get('pinch').set({ enable: true });
+            mc.on('tap', (e) => { e.srcEvent.stopPropagation(); activeSlot = slot; fileInput.click(); });
+            mc.on('pan', (ev) => {
+                const img = slot.querySelector('img'); if (!img) return;
+                const startX = parseFloat(slot.dataset.lastX || 0), startY = parseFloat(slot.dataset.lastY || 0);
+                slot.dataset.posX = startX + ev.deltaX / editorScale; // ズーム倍率を考慮
+                slot.dataset.posY = startY + ev.deltaY / editorScale;
+                updateTransform(slot);
+                if (ev.isFinal) { slot.dataset.lastX = slot.dataset.posX; slot.dataset.lastY = slot.dataset.posY; }
+            });
+            mc.on('pinchmove', (ev) => {
+                const img = slot.querySelector('img'); if (!img) return;
+                const startScale = parseFloat(slot.dataset.lastScale || 1.0);
+                slot.dataset.scale = Math.max(0.1, startScale * ev.scale);
+                updateTransform(slot);
+                if (ev.isFinal) { slot.dataset.lastScale = slot.dataset.scale; }
+            });
+            area.appendChild(slot);
+        });
+
+        function updateTransform(slot) {
+            const img = slot.querySelector('img');
+            if (img) img.style.transform = `translate(${slot.dataset.posX}px, ${slot.dataset.posY}px) scale(${slot.dataset.scale})`;
+        }
+
+        fileInput.onchange = (e) => {
+            const file = e.target.files[0];
+            if (file && activeSlot) {
+                const r = new FileReader();
+                r.onload = (ev) => {
+                    activeSlot.innerHTML = `<div class="img-container"><img src="${ev.target.result}"></div>`;
+                    activeSlot.style.border = "none";
+                    const i = activeSlot.querySelector('img');
+                    i.onload = () => { if (i.width > i.height) i.style.height = '100%'; else i.style.width = '100%'; };
+                };
+                r.readAsDataURL(file);
+            }
+        };
+
+        function generateTransparentImage() {
+            // 保存時はズームと位置をリセットしてキャプチャ
+            const originalTransform = area.style.transform;
+            area.style.transform = "none";
+            
+            const slots = document.querySelectorAll('.photo-slot');
+            slots.forEach(s => s.style.border = "none");
+            
+            html2canvas(area, { backgroundColor: null, useCORS: true, scale: 3 }).then(canvas => {
+                const overlay = document.getElementById('overlay');
+                const finalImage = document.getElementById('finalImage');
+                finalImage.src = canvas.toDataURL("image/png");
+                overlay.style.display = 'flex';
+                area.style.transform = originalTransform; // ズーム状態を戻す
+                slots.forEach(s => { if(!s.querySelector('img')) s.style.border = "1px dashed #bbb"; });
+            });
+        }
+    </script>
+</body>
+</html>
